@@ -1,7 +1,9 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { VertexAI } from '@google-cloud/vertexai';
+import { NewrelicService } from '../../module/service/NewrelicService';
 
+const newrelicService = new NewrelicService();
 /**
  * Hello Agent Lambda function that demonstrates Vertex AI integration
  * @param {Object} event - API Gateway Lambda Proxy Input Format
@@ -14,6 +16,8 @@ export const lambdaHandler = async (
 ): Promise<APIGatewayProxyResult | undefined> => {
     // 💡 THE FIX: Tell Lambda to exit as soon as the main promise resolves.
     context.callbackWaitsForEmptyEventLoop = false;
+
+    // console.log('context:', context);
 
     // Suppress all deprecation warnings including punycode
     const originalEmit = process.emit;
@@ -33,28 +37,48 @@ export const lambdaHandler = async (
         console.warn(warning);
     });
 
-    const secretName = 'vertexai';
+    const vertexAiSecretName = 'vertexai';
+    const newrelicApiKeySecretName = 'newrelic-api-key';
 
-    const client = new SecretsManagerClient({
+    const secretsManagerClient = new SecretsManagerClient({
         region: 'eu-west-1',
     });
 
-    let secretResponse;
+    let vertexAiSecretsResponse;
+    let newrelicApiKeySecretsResponse;
 
     try {
-        secretResponse = await client.send(
+        vertexAiSecretsResponse = await secretsManagerClient.send(
             new GetSecretValueCommand({
-                SecretId: secretName,
-                VersionStage: 'AWSCURRENT', // VersionStage defaults to AWSCURRENT if unspecified
+                SecretId: vertexAiSecretName,
+            }),
+        );
+        newrelicApiKeySecretsResponse = await secretsManagerClient.send(
+            new GetSecretValueCommand({
+                SecretId: newrelicApiKeySecretName,
             }),
         );
     } catch (error) {
-        console.error('here - Error in getting secret:', error);
+        console.error('Error in getting secrets:', error);
         throw error;
     }
 
-    const secret = secretResponse.SecretString;
-    const credentials = JSON.parse(JSON.parse(secret || '{}')[secretName]);
+    const secret = vertexAiSecretsResponse.SecretString;
+    const credentials = JSON.parse(JSON.parse(secret || '{}')[vertexAiSecretName]);
+    const newrelicApiKeySecret = newrelicApiKeySecretsResponse.SecretString;
+    const newrelicApiKey = JSON.parse(newrelicApiKeySecret || '{}')[newrelicApiKeySecretName];
+
+    console.log('New Relic API Key retrieved:', newrelicApiKey ? 'Present' : 'Missing');
+
+    let newRelicResults = null;
+    try {
+        console.log('Calling New Relic service...');
+        newRelicResults = await newrelicService.getMetrics(newrelicApiKey);
+        console.log('New Relic query completed successfully');
+    } catch (error) {
+        console.error('Error in getting New Relic metrics:', error);
+        // Continue execution even if New Relic fails
+    }
 
     try {
         const textModel = 'gemini-2.5-flash';
@@ -76,11 +100,11 @@ export const lambdaHandler = async (
 
         const prompt = 'Why is TypeScript better than JavaScript in a large project?';
 
-        const response = await generativeModel.generateContent({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        });
+        // const response = await generativeModel.generateContent({
+        //     contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        // });
 
-        const generatedText = response.response?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        // const generatedText = response.response?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
         return {
             statusCode: 200,
@@ -89,11 +113,13 @@ export const lambdaHandler = async (
                 'Access-Control-Allow-Origin': '*',
             },
             body: JSON.stringify({
-                message: generatedText,
+                message: 'Hello Agent is working!',
+                newRelicResults,
+                timestamp: new Date().toISOString(),
             }),
         };
     } catch (error) {
-        console.error('here - Error in hello-agent:', error);
+        console.error('Error in hello-agent:', error);
         return {
             statusCode: 500,
             headers: {
